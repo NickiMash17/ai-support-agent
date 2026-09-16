@@ -30,7 +30,7 @@ import logging
 import uuid
 from typing import Dict
 from bedrock_agentcore.tools.code_interpreter_client import code_session
-from strands.tools.browser import AgentCoreBrowser
+from strands_tools.browser import AgentCoreBrowser
 
 
 logging.basicConfig(level=logging.WARNING)
@@ -46,14 +46,13 @@ os.environ["BYPASS_TOOL_CONSENT"] = "true"
 
 
 # ── TODO 2 — Configuration ────────────────────────────────────────────────────
-# Replace these placeholders with your actual AWS resource values.
 GATEWAY_URL = os.getenv(
     "GATEWAY_URL",
-    "https://<your-gateway-url>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
+    "https://customersupportgateway-w8bwsehn3o.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp",
 )
-KB_ID     = os.getenv("KB_ID", "<your-kb-id>")
+KB_ID     = os.getenv("KB_ID", "IEPL7XEU1Q")
 REGION    = os.getenv("REGION", "us-east-1")
-MEMORY_ID = os.getenv("MEMORY_ID", "<your-memory-id>")
+MEMORY_ID = os.getenv("MEMORY_ID", "CustomerSupportMemory-dg74yK9va0")
 
 
 # ── TODO 3 — Model and Clients ────────────────────────────────────────────────
