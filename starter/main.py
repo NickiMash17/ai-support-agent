@@ -229,8 +229,11 @@ def search_knowledge_base(query: str) -> str:
     Returns:
         Relevant information retrieved from the knowledge base
     """
-    if not KB_ID or KB_ID.startswith("<"):
-        return "Knowledge base not configured."
+    if not KB_ID or not KB_ID.strip():
+        return (
+            "Knowledge Base is not configured: KB_ID is empty or missing. "
+            "Please configure KB_ID before attempting a knowledge-base search."
+        )
 
     try:
         resp = _bedrock_runtime.retrieve(
@@ -417,41 +420,66 @@ async def invoke(payload, context=None):
         # Browser tool
         agent_core_browser = AgentCoreBrowser(region=REGION, session_timeout=600)
 
-        # Base tools
-        tools = [
-            search_knowledge_base,
-            calculate_loyalty_discount,
-            agent_core_browser.browser,
-        ]
+        # Personal memory requests are served by MemoryHook.  Excluding
+        # external tools keeps a "remember this" or "what do you remember"
+        # request focused on the memory workflow and avoids unnecessary
+        # Gateway calls for a customer who may not have an order record.
+        normalized_input = user_input.lower()
+        is_memory_only_request = (
+            "remember this for next time" in normalized_input
+            or "what do you remember about me" in normalized_input
+            or "what do you remember from our previous conversation" in normalized_input
+        )
 
-        # Gateway tools via MCP
-        try:
-            mcp_client = MCPClient(
-                lambda: streamable_http_client(url=GATEWAY_URL)
-            )
-            with mcp_client:
-                gateway_tools = get_gateway_tools(mcp_client)
-                logger.info(f"Loaded {len(gateway_tools)} gateway tools")
-                tools.extend(gateway_tools)
-
-                agent = Agent(
-                    model=model,
-                    system_prompt=SYSTEM_PROMPT,
-                    tools=tools,
-                    hooks=[memory_hook],
-                    state={"actor_id": actor_id, "session_id": session_id},
-                )
-                response = agent(user_input)
-        except Exception as e:
-            logger.warning(f"Gateway connection failed: {e}. Running without gateway tools.")
+        if is_memory_only_request:
             agent = Agent(
                 model=model,
                 system_prompt=SYSTEM_PROMPT,
-                tools=tools,
+                tools=[],
                 hooks=[memory_hook],
                 state={"actor_id": actor_id, "session_id": session_id},
             )
             response = agent(user_input)
+        else:
+            # Base tools
+            tools = [
+                search_knowledge_base,
+                calculate_loyalty_discount,
+                agent_core_browser.browser,
+            ]
+
+            # Gateway tools via MCP
+            gateway_client = MCPClient(
+                lambda: streamable_http_client(url=GATEWAY_URL)
+            )
+            try:
+                with gateway_client:
+                    gateway_tools = get_gateway_tools(gateway_client)
+                    tools.extend(gateway_tools)
+                    logger.info(
+                        "Gateway connected successfully. Loaded %d tools.",
+                        len(gateway_tools),
+                    )
+
+                    # The gateway client must stay open while the agent invokes
+                    # its MCP tools.
+                    agent = Agent(
+                        model=model,
+                        system_prompt=SYSTEM_PROMPT,
+                        tools=tools,
+                        hooks=[memory_hook],
+                        state={"actor_id": actor_id, "session_id": session_id},
+                    )
+                    response = agent(user_input)
+            except Exception as e:
+                logger.exception("Gateway connection failed: %s", e)
+                return {
+                    "error": "gateway_unavailable",
+                    "message": (
+                        "I'm sorry, I'm temporarily unable to reach the support "
+                        "tools. Please try again in a moment."
+                    ),
+                }
 
         # Extract text from response
         if hasattr(response, "message"):
