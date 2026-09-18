@@ -20,6 +20,7 @@ from bedrock_agentcore.runtime import BedrockAgentCoreApp
 from bedrock_agentcore.memory import MemoryClient
 from strands.models import BedrockModel
 from strands.tools.mcp.mcp_client import MCPClient
+from strands.tools.mcp.mcp_agent_tool import MCPAgentTool
 from mcp.client.streamable_http import streamable_http_client
 import argparse, json
 import os, asyncio, boto3
@@ -55,8 +56,36 @@ REGION    = os.getenv("REGION", "us-east-1")
 MEMORY_ID = os.getenv("MEMORY_ID", "CustomerSupportMemory-dg74yK9va0")
 
 
+# AgentCore Gateway target names are included in the MCP tool names.  Provide
+# concise agent-facing aliases while preserving the original names for calls to
+# the gateway.
+GATEWAY_TOOL_ALIASES = {
+    "order-tracker___get_order": "get_order",
+    "order-tracker___get_customer": "get_customer",
+    "order-tracker___get_customer_orders": "get_customer_orders",
+    "refund-processor___initiate_refund": "initiate_refund",
+    "refund-processor___check_refund_status": "check_refund_status",
+    "refund-processor___get_return_label": "get_return_label",
+}
+
+
+def get_gateway_tools(mcp_client: MCPClient):
+    """Return gateway tools with stable, model-friendly names."""
+    gateway_tools = mcp_client.list_tools_sync()
+    return [
+        MCPAgentTool(
+            gateway_tool.mcp_tool,
+            mcp_client,
+            name_override=GATEWAY_TOOL_ALIASES.get(
+                gateway_tool.tool_name, gateway_tool.tool_name
+            ),
+        )
+        for gateway_tool in gateway_tools
+    ]
+
+
 # ── TODO 3 — Model and Clients ────────────────────────────────────────────────
-model_id = "global.amazon.nova-2-lite-v1:0"
+model_id = "us.anthropic.claude-3-haiku-20240307-v1:0"
 
 model = BedrockModel(model_id=model_id, region_name=REGION)
 memory_client = MemoryClient(region_name=REGION)
@@ -208,7 +237,7 @@ def search_knowledge_base(query: str) -> str:
             knowledgeBaseId=KB_ID,
             retrievalQuery={"text": query},
             retrievalConfiguration={
-                "vectorSearchConfiguration": {"numberOfResults": 5}
+                "managedSearchConfiguration": {"numberOfResults": 5}
             },
         )
         results = resp.get("retrievalResults", [])
@@ -334,18 +363,28 @@ print(json.dumps(result))
 SYSTEM_PROMPT = """You are a helpful and knowledgeable customer support assistant for an e-commerce store.
 
 Your capabilities:
-1. Order tracking and shipping status — use the order_tracker tools
-2. Refund and return processing — use the refund_processor tool
+1. Order tracking — use get_order(order_id), get_customer(customer_id), or get_customer_orders(customer_id)
+2. Refund and return processing — use initiate_refund(order_id, reason, amount), check_refund_status(refund_id), or get_return_label(order_id)
 3. Product information, return policies, warranty, loyalty tiers — use search_knowledge_base
 4. Remember customer details across sessions — handled automatically
 5. Loyalty discount calculations — ALWAYS use calculate_loyalty_discount (never calculate yourself)
-6. Live web browsing — use the browser tool
+6. LIVE WEB SEARCH — use the `browser` tool for ANY request about:
+   - recent news
+   - current events
+   - external websites
+   - anything that is NOT in our knowledge base
+
+STRICT TOOL ROUTING:
+- For order lookups, use get_order, get_customer, or get_customer_orders exactly.
+- For a confirmed refund request, use initiate_refund exactly. Supply the order ID, the customer's reason, and the full order amount when it is known.
+- If the user asks about "news", "latest", "current", "web", "search the web", or "look up online" → you MUST use the `browser` tool. Do NOT use search_knowledge_base for these.
+- search_knowledge_base is ONLY for internal policies and product info.
+- Never guess numbers. Never fabricate refund amounts.
+- Never use a loyalty discount calculation to determine a refund; refunds use the original order amount.
+- Never state that a refund was initiated, approved, or completed unless initiate_refund returned a successful tool result. If the tool is unavailable or fails, explain that the refund was not processed and offer escalation.
 
 Guidelines:
 - Be friendly, concise, and professional
-- ALWAYS use search_knowledge_base before answering questions about policies or products
-- ALWAYS use calculate_loyalty_discount for any numeric discount calculation
-- Never guess numbers
 - If you cannot help, offer to escalate to a human
 """
 
@@ -391,7 +430,7 @@ async def invoke(payload, context=None):
                 lambda: streamable_http_client(url=GATEWAY_URL)
             )
             with mcp_client:
-                gateway_tools = mcp_client.list_tools_sync()
+                gateway_tools = get_gateway_tools(mcp_client)
                 logger.info(f"Loaded {len(gateway_tools)} gateway tools")
                 tools.extend(gateway_tools)
 
@@ -436,9 +475,13 @@ def main():
     args = parser.parse_args()
     response = asyncio.run(invoke(json.loads(args.payload)))
     print(response)
+    os._exit(0)
 
 
 if __name__ == "__main__":
-    app.run()
-    # Uncomment the line below and comment app.run() for local CLI testing:
-    # main()
+    # A positional payload denotes a local smoke test; AgentCore starts the
+    # runtime when the module is launched without one.
+    if len(os.sys.argv) > 1:
+        main()
+    else:
+        app.run()
